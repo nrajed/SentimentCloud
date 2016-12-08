@@ -1,10 +1,12 @@
 import json
 import oauth2 as oauth
+import os
+import re
 import requests
 import requests_oauthlib
 import socket
 import sys
-sys.path.insert(0, './services/')
+# sys.path.insert(0, './services/')
 import thread
 import time
 from datetime import datetime
@@ -28,6 +30,7 @@ Twitter Streaming API Request Parameters:
 
 
 MAX_LINES = 1000
+MIN_DURATION = 40
 HOST = ''
 # PORTS = [9991, 9992, 9993]
 PORT = 9994
@@ -53,10 +56,10 @@ def firehose_client(conn, auth, params):
     count = 0
     for line in response.iter_lines():
         try:
-            # r = json.loads(line.decode['utf-8'])
-            # r['text'], r['coordinates'], r['place'], etc.
-            # tweet = r['text']
-            conn.send(line+'\n')
+            # post = json.loads(line.decode['utf-8'])
+            # post['text'], post['coordinates'], post['place'], etc.
+            # tweet = post['text']
+            conn.send(line + '\n')
             count += 1
             print(str(datetime.now() + ' ' + 'count: ' + str(count)))
             if count > MAX_LINES:
@@ -71,7 +74,6 @@ def firehose_client(conn, auth, params):
                 # conn.close()
                 # return -1 
 
-    print('finished streaming-------')
     conn.close()
 
 
@@ -81,6 +83,7 @@ def socket_listener(port, params):
     print('Socket created')
 
     try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         sock.bind((HOST, port))
     except socket.error, msg:
         print('Bind failed. Error Code: ' +
@@ -114,56 +117,74 @@ def create_request_params(job, lang='en'):
     }
 
 
-# def socket_setup(params):
-#     print('Creating listener thread')
-#     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-#     for port in PORTS:
-#         listener_thread = Thread(target=socket_listener,
-#                                  args=(PORTS, params))
-#         listener_thread.start()
-#         time.sleep(2)
-#         print(sock.connect_ex((HOST, port)))
-#         if sock.connect_ex((HOST, port)) != 0:
-#             print('bound at: {}'.format(port))
-#             return port
-
-#     return None
-
-
 def poll_jobs(fb):
     while True:
+        print('polling for jobs')
         result = fb.get('/jobs', None)
         for k, v in result.iteritems():
-            if v['status'] == 'waiting':
-                print k, v
-                params = create_request_params(v)
-                duration = v['duration']
+            if v['status'] != 'waiting':
+                continue
 
-                listener_thread = Thread(target=socket_listener,
-                                         args=(PORT, params))
-                listener_thread.deamon = True
-                listener_thread.start()
-                time.sleep(2)
-                if not listener_thread.isAlive():
-                    print('--listener died--')
-                    break
-                
-                print('starting spark on port: {}'.format(PORT))
-                spark_thread = Thread(target=spark_client.start,
-                                      args=(PORT, duration))
-                spark_thread.start()
-                print('started spark thread')
-                
-                pid = listener_thread.ident
-                print(pid)
-                # print(os.kill(pid, signal.SIGTERM) #or signal.SIGKILL )
+            print k, v
+            params = create_request_params(v)
+            try:
+                duration = int(v['duration'])
+                if duration < MIN_DURATION:
+                    duration = MIN_DURATION
+            except ValueError:
+                duration = MIN_DURATION
 
-                spark_thread.join()
-                print('spark thread finished')
-                listener_thread.join()
-                print('listener thread finished')
+            listener_thread = Thread(target=socket_listener,
+                                     args=(PORT, params))
+            listener_thread.deamon = True
+            listener_thread.start()
+            time.sleep(2)
+            if not listener_thread.isAlive():
+                print('Retrying bind')
+                break
 
-                time.sleep(5)
+            fb.put('/jobs/' + k, 'status', 'in-progress')
+
+            print('starting spark on port: {}'.format(PORT))
+            spark_thread = Thread(target=spark_client.start,
+                                  args=(PORT, duration, k))
+            spark_thread.start()
+
+            spark_thread.join()
+            print('spark thread finished')
+            listener_thread.join()
+            print('listener thread finished')
+
+            # get newly made directories (output from spark streaming)
+            job_dirs = [d for d in os.listdir('./') if d.endswith(k)]
+            if not job_dirs:
+                print('spark streaming yielded no results')
+                fb.put('/jobs' + k, 'status', 'waiting')
+                continue
+
+            p = re.compile('(part-\d+)')
+            # TODO: list comprehension doesn't work :(
+            # filenames = [jd + '/' + d for d in os.listdir(jd) if p.match(d) for jd in job_dirs]
+            filenames = []
+            for jd in job_dirs:
+                for d in os.listdir(jd):
+                    if p.match(d):
+                        filenames.append(jd + '/' + d)
+            
+            tweets = []
+            for fname in filenames:
+                with open(fname) as f:
+                    lines = [line.strip() for line in f]
+                    tweets += lines
+            
+            print len(tweets)
+            for tweet in tweets:
+                print tweet
+
+
+            fb.put('/jobs/' + k, 'status', 'completed')
+
+            time.sleep(5)
 
         time.sleep(10)
 

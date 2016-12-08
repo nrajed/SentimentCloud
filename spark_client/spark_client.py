@@ -14,8 +14,8 @@ def get_json(myjson):
     return json_object
 
 
-def start(port, duration=30):
-    BATCH_INTERVAL = 10  # How frequently to update (seconds)
+def start(port, duration=40, jobID=''):
+    BATCH_INTERVAL = 20  # How frequently to update (seconds)
 
     # Create a local StreamingContext with two working thread and
     #   batch interval of 1 second
@@ -31,7 +31,7 @@ def start(port, duration=30):
                   .map(lambda post: post['created_at'] + post['text'])
 
     tweets.pprint()
-    tweets.saveAsTextFiles('./tweets')
+    tweets.saveAsTextFiles('./tweets', suffix=jobID)
     # Split each line into words
     # words = lines.flatMap(lambda line: line.split(" "))
 
