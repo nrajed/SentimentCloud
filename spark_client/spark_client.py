@@ -28,7 +28,7 @@ def start(port, duration=40, jobID=''):
     tweets = lines.map(lambda post: get_json(post))\
                   .filter(lambda post: post is not None)\
                   .filter(lambda post: 'created_at' in post)\
-                  .map(lambda post: post['created_at'] + post['text'])
+                  .map(lambda post: post['created_at'] + ' | ' + post['text'])
 
     tweets.pprint()
     tweets.saveAsTextFiles('./tweets', suffix=jobID)
