@@ -1,14 +1,17 @@
+import argparse
 import json
+import math
 import oauth2 as oauth
 import os
 import re
 import requests
 import requests_oauthlib
+import shutil
 import socket
 import sys
-# sys.path.insert(0, './services/')
 import thread
 import time
+import timeit
 from datetime import datetime
 from firebase import firebase
 from pycorenlp import StanfordCoreNLP
@@ -16,6 +19,7 @@ from pyspark import SparkContext
 from pyspark.streaming import StreamingContext
 from spark_client import spark_client
 from threading import Thread
+from vaderSentiment.vaderSentiment import sentiment as vaderSentiment
 
 
 '''
@@ -32,10 +36,10 @@ Twitter Streaming API Request Parameters:
 
 MAX_LINES = 1000
 MIN_DURATION = 40
+BATCH_INTERVAL = 20
 HOST = ''
-# TODO: Loop through ports
-PORT = 9994
-FIREBASE_URL = "https://sentimentcloud.firebaseio.com/"
+
+# FIREBASE_URL = "https://sentimentcloud.firebaseio.com/"
 nlp = StanfordCoreNLP('http://localhost:8080')
 
 # Authentication
@@ -50,6 +54,7 @@ auth = requests_oauthlib.OAuth1(consumer_key,
 
 
 def firehose_client(conn, auth, params):
+
     url = 'https://stream.twitter.com/1.1/statuses/filter.json'
     query = url + '?' + '&'.join(k + '=' + v for k, v in params.iteritems())
     response = requests.get(query, auth=auth, stream=True)
@@ -68,7 +73,7 @@ def firehose_client(conn, auth, params):
                 break
         except:
             err = sys.exc_info()[0]
-            print('Error: {}'.format(err))
+            # print('Error: {}'.format(err))
             if err == socket.error:
                 conn.close()
                 break
@@ -86,7 +91,7 @@ def socket_listener(port, params):
         sock.bind((HOST, port))
     except socket.error, msg:
         print('Bind failed. Error Code: ' +
-              str(msg[0]) + ' Message ' + msg[1])
+              str(msg[0]) + ' Message: ' + msg[1])
         print('closing...')
         sock.close()
         sys.exit(0)
@@ -107,6 +112,7 @@ def socket_listener(port, params):
 
 
 def create_request_params(job, lang='en'):
+
     keywords = job['keywords']
     if type(keywords) == list and len(keywords) > 1:
         keywords = ','.join(keywords)
@@ -116,35 +122,44 @@ def create_request_params(job, lang='en'):
     }
 
 
-def run_sentiment_analyzer(tweets_str):
-    res = nlp.annotate(tweets_str, properties={
+def run_vader_sentiment_analyzer(batch, sentiments, cutoffs=[-0.50, 0.50]):
+
+    for text in batch:
+        vs = vaderSentiment(text)
+        score = vs['compound']
+        if score < cutoffs[0]:
+            sentiments['negative'] += 1
+        elif score > cutoffs[1]:
+            sentiments['positive'] += 1
+        else:
+            sentiments['neutral'] += 1
+
+
+def run_corenlp_sentiment_analyzer(text_batch, sentiments):
+
+    res = nlp.annotate(text_batch, properties={
                                         'annotators': 'sentiment',
                                         'outputFormat': 'json',
                                         'ssplit.eolonly': 'true'
                                     })
-    sentiments = {
-        'positive': 0,
-        'negative': 0,
-        'neutral': 0
-    }
 
     for s in res['sentences']:
         val = int(s['sentimentValue'])
-        if val == 0 or val == 1:
+        if val in [0, 1]:
             sentiments['negative'] += 1
         elif val == 2:
             sentiments['neutral'] += 1
         else:
-            sentiments['positive'] +=1
-    
-    return sentiments
+            sentiments['positive'] += 1
 
-def collect_tweets(jobID):
+
+def collect_text(jobID):
+
     # get newly made directories (output from spark streaming)
     job_dirs = [d for d in os.listdir('./') if d.endswith(jobID)]
     if not job_dirs:
         print('spark streaming yielded no results')
-        fb.put('/jobs' + jobID, 'status', 'waiting')
+        fb.put('/jobs/' + jobID, 'status', 'waiting')
         return None
 
     p = re.compile('(part-\d+)')
@@ -163,50 +178,17 @@ def collect_tweets(jobID):
             lines = [line.strip() for line in f]
             tweets += lines
 
+    for job_dir in job_dirs:
+        shutil.rmtree(job_dir)
+
     return tweets
 
 
-def start_job(jobID, job):
-    params = create_request_params(job)
-    try:
-        duration = int(job['duration'])
-        if duration < MIN_DURATION:
-            duration = MIN_DURATION
-    except ValueError:
-        duration = MIN_DURATION
+def clean_text(input_text):
 
-    listener_thread = Thread(target=socket_listener,
-                             args=(PORT, params))
-    listener_thread.deamon = True
-    listener_thread.start()
-    time.sleep(2)
-    if not listener_thread.isAlive():
-        print('Retrying bind')
-        return -1
-
-    fb.put('/jobs/' + jobID, 'status', 'in-progress')
-
-    print('starting spark on port: {}'.format(PORT))
-    spark_thread = Thread(target=spark_client.start,
-                          args=(PORT, duration, jobID))
-    spark_thread.start()
-
-    spark_thread.join()
-    print('spark thread finished')
-    listener_thread.join()
-    print('listener thread finished')
-
-    tweets = collect_tweets(jobID)
-    if not tweets:
-        fb.put('/jobs/' + jobID, 'status', 'waiting')
-        return -1
-
-    print('pre-cleaning count: {}'.format(len(tweets)))
-    cleaned_tweets = ['' for i in xrange(len(tweets))]
-    # clean the tweets; strip unwanted text
-    for i, tweet in enumerate(tweets):
-        # print('tweet: {}'.format(tweet))
-        # print('split: {}'.format(tweet.split('|', 1)))
+    cleaned_text = ['' for i in xrange(len(input_text))]
+    # clean the input text; strip unwanted text
+    for i, tweet in enumerate(input_text):
         text = tweet.split('|', 1)
         if len(text) > 1:
             text = text[1].lstrip()
@@ -218,35 +200,112 @@ def start_job(jobID, job):
             # prevent non-ascii encodable strings to coreNLP
             d = text.decode('utf-8')
             str(d)  # should cause the exception if we want to throw away
-            cleaned_tweets[i] = text
+            cleaned_text[i] = text
         except (UnicodeDecodeError, UnicodeEncodeError):
             pass
             # print('Ill-formed tweet text')
 
-    cleaned_tweets = [s for s in cleaned_tweets if s]
-    print('post-cleaning count: {}'.format(len(cleaned_tweets)))
+    cleaned_text = [s for s in cleaned_text if s]
 
-    # combine tweets for batch coreNLP processing
-    tweets_batch = '\n'.join(cleaned_tweets)
-    sentiments = run_sentiment_analyzer(tweets_batch)
-    
-    if sentiments:
-        fb.put('/jobs/' + jobID, 'results', sentiments)
 
+def start_job(jobID, job, config):
+
+    port = config['port']
+    split_jobs = config['split_jobs']
+    sentiment_analyzer = config['sentiment_analyzer']
+
+    params = create_request_params(job)
+    try:
+        duration = int(job['duration'])
+        if duration < MIN_DURATION:
+            duration = MIN_DURATION
+    except ValueError:
+        duration = MIN_DURATION
+    duration = [duration]
+
+    num_jobs = 1
+    if split_jobs:
+        num_jobs = duration[0] // BATCH_INTERVAL
+        remainder = duration[0] % BATCH_INTERVAL
+        duration = [BATCH_INTERVAL for i in xrange(num_jobs)]
+        if remainder != 0:
+            num_jobs += 1
+            duration.append(remainder)
+
+    sentiments = {
+        'positive': 0,
+        'negative': 0,
+        'neutral': 0
+    }
+
+    for j in xrange(num_jobs):
+
+        print('Executing batch {} of {}'.format(j+1, num_jobs))
+        listener_thread = Thread(target=socket_listener,
+                                 args=(port, params))
+        listener_thread.deamon = True
+        listener_thread.start()
+        time.sleep(2)
+        if not listener_thread.isAlive():
+            print('Retrying bind')
+            return -1
+
+        fb.put('/jobs/' + jobID, 'status', 'in-progress')
+
+        print('starting spark on port: {}'.format(port))
+        spark_thread = Thread(target=spark_client.start,
+                              args=(port, duration[j], jobID, BATCH_INTERVAL))
+        spark_thread.start()
+
+        spark_thread.join()
+        print('spark thread finished')
+        listener_thread.join()
+        print('listener thread finished')
+
+        text = collect_text(jobID)
+        if not text:
+            continue
+
+        # cleaned_text = clean_text(text)
+        cleaned_text = text
+        if not cleaned_text:
+            continue
+
+        # TODO: parallelize
+        # Sentiment Analyzer batch
+        sa_batch_size = 500
+        N = len(cleaned_text)
+        sa_batch = [cleaned_text[i:i+sa_batch_size]
+                    for i in xrange(0, N, sa_batch_size)]
+        for batch in sa_batch:
+            if sentiment_analyzer == 'coreNLP':
+                run_corenlp_sentiment_analyzer('\n'.join(batch), sentiments)
+            elif sentiment_analyzer == 'vader':
+                run_vader_sentiment_analyzer(batch, sentiments)
+            else:
+                pass
+            fb.put('/jobs/' + jobID, 'results', sentiments)
+
+    print('=======FINISHING=======')
     fb.put('/jobs/' + jobID, 'status', 'completed')
     return 0
 
-def poll_jobs(fb):
+
+def poll_jobs(fb, config):
+
     while True:
         print('polling for jobs')
         result = fb.get('/jobs', None)
         for k, v in result.iteritems():
             if v['status'] != 'waiting':
                 continue
-            status_code = start_job(k, v)
+            t0 = timeit.default_timer()
+            status_code = start_job(k, v, config)
             if status_code != 0:
-                fb.put('/jobs/' + jobID, 'status', 'waiting')
+                fb.put('/jobs/' + k, 'status', 'waiting')
                 continue
+            t1 = timeit.default_timer() - t0
+            print('Job Process time: {}'.format(t1))
             time.sleep(5)
 
         # Throttle the stream
@@ -254,5 +313,58 @@ def poll_jobs(fb):
 
 
 if __name__ == "__main__":
-    fb = firebase.FirebaseApplication(FIREBASE_URL, None)
-    poll_jobs(fb)
+
+    parser = argparse.ArgumentParser()
+    msg = 'Firebase URL. Required! Currently only supports public db. ' +\
+          'Ex: https://sentimentcloud.firebaseio.com'
+    parser.add_argument('--firebase', help=msg)
+
+    msg = '[Y/N].' + 'Split duration of all jobs into ' +\
+          'BATCH_INTERVAL/Job_Duration segments. ' +\
+          'N by default.'
+    parser.add_argument('--split-jobs', help=msg)
+
+    msg = 'Choice of sentiment analyzer. ' +\
+          'Currently supported: Stanford [coreNLP], GATech [VADER]. ' +\
+          'Note: [coreNLP], if used, must be listening on port  8080' +\
+          'Default is VADER'
+    parser.add_argument('--sa', help=msg)
+
+    msg = 'localhost port number. Default is 9992'
+    parser.add_argument('--port', help=msg)
+
+    msg = '[Seconds] to wait for new jobs before timing out. Default is 6000'
+    parser.add_argument('--timeout', help=msg)
+
+    args = parser.parse_args()
+
+    config = {
+        'split_jobs': False,
+        'sentiment_analyzer': 'vader',
+        'port': 9992,
+        'timeout': 6000
+    }
+
+    # TODO: Remove this when finished with project
+    if args.firebase:
+        firebase_url = args.firebase.lower()
+    else:
+        raise ValueError('Must provide Firebase URL!')
+    if args.split_jobs:
+        if args.split_jobs.lower() == 'y':
+            config['split_jobs'] = True
+    if args.sa:
+        config['sentiment_analyzer'] = args.sa.lower()
+    if args.port:
+        try:
+            config['port'] = int(args.port)
+        except ValueError:
+            pass
+    if args.timeout:
+        try:
+            config['timeout'] = int(args.timeout)
+        except ValueError:
+            pass
+
+    fb = firebase.FirebaseApplication(firebase_url, None)
+    poll_jobs(fb, config)
