@@ -71,3 +71,9 @@ python runner.py -h
 python example_job.py
 python runner.py --firebase https://sentimentcloud.firebaseio.com
 ```
+
+Note: if you are using CoreNLP, you must also start the CoreNLP server by running 
+```
+java -mx4g -cp "*" edu.stanford.nlp.pipeline.StanfordCoreNLPServer -port 8080
+```
+from inside the stanford-corenlp-full-2016-10-31 folder.
