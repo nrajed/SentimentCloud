@@ -59,15 +59,15 @@ Rutgers - ECE494
 
   This will start the program - which usually sits on EC2, but can be run from your own machine - which will poll Firebase for new jobs. To test that it works, you may run the ``` example_job.py ``` file to push a job.
   
-4. **Running**
+## Running
 
-  To see available command line arguments:
-  ```
-  python runner.py -h
-  ```
-  
-  **Example Run**:
-  ```
-  python example_job.py
-  python runner.py --firebase https://sentimentcloud.firebaseio.com
-  ```
+To see available command line arguments:
+```
+python runner.py -h
+```
+
+**Example Run**:
+```
+python example_job.py
+python runner.py --firebase https://sentimentcloud.firebaseio.com
+```
