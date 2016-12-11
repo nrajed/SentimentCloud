@@ -68,8 +68,9 @@ python runner.py -h
 
 **Example Run**:
 ```
-python example_job.py
+python example_job_push.py
 python runner.py --firebase https://sentimentcloud.firebaseio.com
+python example_job_pull.py
 ```
 
 Note: if you are using CoreNLP, you must also start the CoreNLP server by running 
