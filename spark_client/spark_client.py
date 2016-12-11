@@ -3,22 +3,12 @@ Parth Parikh, Nivedh Rajesh, Alessandro Orsini
 Rutgers ECE494 - Cloud Computing
 '''
 import json
-from pycorenlp import StanfordCoreNLP
 from pyspark import SparkContext
 from pyspark.streaming import StreamingContext
 from vaderSentiment.vaderSentiment import sentiment as vaderSentiment
 
 
 HOST = ''
-
-# Currently not used for in-line sentiment analysis; see VADER implementation
-nlp = StanfordCoreNLP('http://localhost:8080')
-nlp_properties = {
-    'annotators': 'sentiment',
-    'outputFormat': 'json',
-    'ssplit.eolonly': 'true'
-}
-
 
 def get_json(myjson):
 

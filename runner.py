@@ -18,7 +18,7 @@ import time
 import timeit
 from datetime import datetime
 from firebase import firebase
-from pycorenlp import StanfordCoreNLP
+# from pycorenlp import StanfordCoreNLP
 from pyspark import SparkContext
 from pyspark.streaming import StreamingContext
 from spark_client import spark_client
@@ -44,7 +44,7 @@ BATCH_INTERVAL = 20  # if split processing is enabled, default BATCH_INTERVAL
 HOST = ''  # All ports will belong to localhost
 
 # FIREBASE_URL = "https://sentimentcloud.firebaseio.com/"
-nlp = StanfordCoreNLP('http://localhost:8080')
+# nlp = StanfordCoreNLP('http://localhost:8080')
 
 # TODO: This will be removed shortly after the course ends and will need
 #   a configuration file with Twitter Authentication
