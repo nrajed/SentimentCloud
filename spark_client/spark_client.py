@@ -1,3 +1,7 @@
+'''
+Parth Parikh, Nivedh Rajesh, Alessandro Orsini
+Rutgers ECE494 - Cloud Computing
+'''
 import json
 from pycorenlp import StanfordCoreNLP
 from pyspark import SparkContext
@@ -7,6 +11,7 @@ from vaderSentiment.vaderSentiment import sentiment as vaderSentiment
 
 HOST = ''
 
+# Currently not used for in-line sentiment analysis; see VADER implementation
 nlp = StanfordCoreNLP('http://localhost:8080')
 nlp_properties = {
     'annotators': 'sentiment',
@@ -16,6 +21,7 @@ nlp_properties = {
 
 
 def get_json(myjson):
+
     try:
         json_object = json.loads(myjson)
     except ValueError, e:
@@ -24,6 +30,9 @@ def get_json(myjson):
 
 
 def discretized_vader(text, cutoffs=[-0.150, 0.150]):
+    '''
+    Give a discreted VADER sentiment score
+    '''
     score = vaderSentiment(text)['compound']
     if score < cutoffs[0]:
         return 1
@@ -33,6 +42,9 @@ def discretized_vader(text, cutoffs=[-0.150, 0.150]):
 
 
 def is_valid_string_format(text):
+    '''
+    Discard text that cannot be converted to ascii or unicode
+    '''
     try:
         # prevent non-ascii encodable strings to coreNLP
         d = text.decode('utf-8')
@@ -43,6 +55,9 @@ def is_valid_string_format(text):
 
 
 def start(port, duration=40, jobID='', batch_interval=20):
+    '''
+    All Spark Streaming options go here
+    '''
 
     # Create a local StreamingContext with two working thread and
     #   batch interval of 1 second
@@ -58,15 +73,19 @@ def start(port, duration=40, jobID='', batch_interval=20):
                 .filter(lambda post: is_valid_string_format(post['text']))\
                 .map(lambda post: post['created_at'] + ' | ' + post['text'])
 
-    # No write to disk option!
-
+    '''
+    No write to disk option! This will compute sentiment on the fly without
+    first writing all text to temporary disk storage. To utilize this map(),
+    users will need to only save the sentiment counts to a file and read
+    from it in the runner.py code
+    '''
     # sentiment_counts = cleaned_text.map(
     #     lambda text: (discretized_vader(text), 1)
     # ).reduceByKey(lambda x, y: x + y)
 
     # sentiment_counts.pprint()
 
-    text.saveAsTextFiles('./tweets', suffix=jobID)
+    text.saveAsTextFiles('./text', suffix=jobID)
 
     ssc.start()
     ssc.awaitTerminationOrTimeout(duration)

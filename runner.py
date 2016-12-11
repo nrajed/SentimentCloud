@@ -1,3 +1,7 @@
+'''
+Parth Parikh, Nivedh Rajesh, Alessandro Orsini
+Rutgers ECE494 - Cloud Computing
+'''
 import argparse
 import json
 import math
@@ -34,15 +38,16 @@ Twitter Streaming API Request Parameters:
 '''
 
 
-MAX_LINES = 1000
-MIN_DURATION = 40
-BATCH_INTERVAL = 20
-HOST = ''
+MAX_LINES = 100000  # Cap the number of lines processed per BATCH_INTERVAL
+MIN_DURATION = 40  # Enforce a minimum streaming job duration
+BATCH_INTERVAL = 20  # if split processing is enabled, default BATCH_INTERVAL
+HOST = ''  # All ports will belong to localhost
 
 # FIREBASE_URL = "https://sentimentcloud.firebaseio.com/"
 nlp = StanfordCoreNLP('http://localhost:8080')
 
-# Authentication
+# TODO: This will be removed shortly after the course ends and will need
+#   a configuration file with Twitter Authentication
 consumer_key = 'dIberpk03sTPsn9yXiSfDoJnV'
 consumer_secret = 'tpDKQSj1te1EMKb1bVKC1ofMqzr4mBhrMrqRKo4wdqXIqv03YH'
 access_token = '796046817649692672-ZpmBrdDKDkjr5D9ibArLUa8rwX3sEwz'
@@ -54,6 +59,10 @@ auth = requests_oauthlib.OAuth1(consumer_key,
 
 
 def firehose_client(conn, auth, params):
+    '''
+    Set up Twitter Streaming API parameters and
+    begin writing to socket
+    '''
 
     url = 'https://stream.twitter.com/1.1/statuses/filter.json'
     query = url + '?' + '&'.join(k + '=' + v for k, v in params.iteritems())
@@ -82,7 +91,10 @@ def firehose_client(conn, auth, params):
 
 
 def socket_listener(port, params):
-
+    '''
+    Bind a listener to socket at specified port.
+    If the port is busy, terminate the thread and the close the connection.
+    '''
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     print('Socket created')
 
@@ -105,6 +117,7 @@ def socket_listener(port, params):
     print 'Connected with ' + addr[0] + ':' + str(addr[1])
     firehose_client(conn, auth, params)
 
+    # gracefully shutdown and close socket when Twitter Streaming finishes
     print('Closing socket...')
     sock.shutdown(socket.SHUT_RDWR)
     sock.close()
@@ -123,7 +136,12 @@ def create_request_params(job, lang='en'):
 
 
 def run_vader_sentiment_analyzer(batch, sentiments, cutoffs=[-0.50, 0.50]):
-
+    '''
+    One of the NLP tools used to evaluate sentiment.
+    VADER outputs a compound score between -1 and +1 so we must make
+    our own wrapper to categorize the scores the way we see fit.
+    Cutoffs for negative, nuetral, and positive can be optionally specified.
+    '''
     for text in batch:
         vs = vaderSentiment(text)
         score = vs['compound']
@@ -136,7 +154,16 @@ def run_vader_sentiment_analyzer(batch, sentiments, cutoffs=[-0.50, 0.50]):
 
 
 def run_corenlp_sentiment_analyzer(text_batch, sentiments):
-
+    '''
+    One of the NLP tools used to evaluate sentiment.
+    CoreNLP outputs a score in [0, 5] that corresponds from Very Negative (0)
+    to Very Positive (5), but these two extremes are extremely rare so we
+    decide to lump them into three general categories.
+    In the nlp.annotate(properties=) flag, we can send in large strings
+    delimited by newline characters to be processed all at once. To avoid
+    computation timeout, the calling function should appropriately avoid
+    sending too-large strings.
+    '''
     res = nlp.annotate(text_batch, properties={
                                         'annotators': 'sentiment',
                                         'outputFormat': 'json',
@@ -154,6 +181,11 @@ def run_corenlp_sentiment_analyzer(text_batch, sentiments):
 
 
 def collect_text(jobID):
+    '''
+    If NLP computation is not done on the fly (this is implemented, but
+    not enabled), we must collect all the spark streaming job's relevant text
+    output. 
+    '''
 
     # get newly made directories (output from spark streaming)
     job_dirs = [d for d in os.listdir('./') if d.endswith(jobID)]
@@ -172,20 +204,24 @@ def collect_text(jobID):
             if p.match(d):
                 filenames.append(jd + '/' + d)
 
-    tweets = []
+    text = []
     for fname in filenames:
         with open(fname) as f:
             lines = [line.strip() for line in f]
-            tweets += lines
+            text += lines
 
     for job_dir in job_dirs:
         shutil.rmtree(job_dir)
 
-    return tweets
+    return text
 
 
 def clean_text(input_text):
-
+    '''
+    No longer needed. This function should be called and modified to
+    clean the text from the input source. Most NLP tools cannot processed
+    non-unicode or non-ascii input, e.g. emojis.
+    '''
     cleaned_text = ['' for i in xrange(len(input_text))]
     # clean the input text; strip unwanted text
     for i, tweet in enumerate(input_text):
@@ -209,11 +245,17 @@ def clean_text(input_text):
 
 
 def start_job(jobID, job, config):
+    '''
+    This function handles most of the logic.
+    It essentially is responsible for spawning new threads,
+    waiting on them to join, and publishing to Firebase.
+    '''
 
     port = config['port']
     split_jobs = config['split_jobs']
     sentiment_analyzer = config['sentiment_analyzer']
 
+    # Create request parameters and ensure minimum duration
     params = create_request_params(job)
     try:
         duration = int(job['duration'])
@@ -223,6 +265,7 @@ def start_job(jobID, job, config):
         duration = MIN_DURATION
     duration = [duration]
 
+    # Handle case where user wants to do split processing
     num_jobs = 1
     if split_jobs:
         num_jobs = duration[0] // BATCH_INTERVAL
@@ -241,44 +284,51 @@ def start_job(jobID, job, config):
     for j in xrange(num_jobs):
 
         print('Executing batch {} of {}'.format(j+1, num_jobs))
+
+        # Spawn a listener thread, sleep for 2 seconds to ensure connectivity
         listener_thread = Thread(target=socket_listener,
                                  args=(port, params))
         listener_thread.deamon = True
         listener_thread.start()
         time.sleep(2)
+        # Check if binding was successful
         if not listener_thread.isAlive():
             print('Retrying bind')
             return -1
 
+        # Upon successful binding, set job status as in-progress and begin
         fb.put('/jobs/' + jobID, 'status', 'in-progress')
 
         print('starting spark on port: {}'.format(port))
+
+        # Begin Spark Streaming thread
         spark_thread = Thread(target=spark_client.start,
                               args=(port, duration[j], jobID, BATCH_INTERVAL))
         spark_thread.start()
 
+        # Wait for both threads to join again
         spark_thread.join()
         print('spark thread finished')
         listener_thread.join()
         print('listener thread finished')
 
+        # collect text from files if they have been written to files
+        # as it stands currently, all text is temporarily written to files, but
+        # this can be removed completely (see spark_client.py code)
         text = collect_text(jobID)
         if not text:
             continue
+        
+        # text = clean_text(text)
 
-        # cleaned_text = clean_text(text)
-        cleaned_text = text
-        if not cleaned_text:
-            continue
-
-        # TODO: parallelize
-        # Sentiment Analyzer batch
+        # TODO: This can be parallelized
+        # Sentiment Analyzer batches to avoid timeout/computation overload
         sa_batch_size = 500
-        N = len(cleaned_text)
-        sa_batch = [cleaned_text[i:i+sa_batch_size]
+        N = len(text)
+        sa_batch = [text[i:i+sa_batch_size]
                     for i in xrange(0, N, sa_batch_size)]
         for batch in sa_batch:
-            if sentiment_analyzer == 'coreNLP':
+            if sentiment_analyzer == 'corenlp':
                 run_corenlp_sentiment_analyzer('\n'.join(batch), sentiments)
             elif sentiment_analyzer == 'vader':
                 run_vader_sentiment_analyzer(batch, sentiments)
@@ -292,6 +342,9 @@ def start_job(jobID, job, config):
 
 
 def poll_jobs(fb, config):
+    '''
+    Continuously poll for new jobs from Firebase
+    '''
 
     while True:
         print('polling for jobs')
@@ -299,16 +352,16 @@ def poll_jobs(fb, config):
         for k, v in result.iteritems():
             if v['status'] != 'waiting':
                 continue
-            t0 = timeit.default_timer()
             status_code = start_job(k, v, config)
+            # disconnection or job failure
             if status_code != 0:
                 fb.put('/jobs/' + k, 'status', 'waiting')
                 continue
-            t1 = timeit.default_timer() - t0
-            print('Job Process time: {}'.format(t1))
+            # throttle job processing in between multiple jobs
+            # ensures ports/sockets are ready 
             time.sleep(5)
 
-        # Throttle the stream
+        # Throttle the job polling
         time.sleep(10)
 
 
@@ -345,7 +398,6 @@ if __name__ == "__main__":
         'timeout': 6000
     }
 
-    # TODO: Remove this when finished with project
     if args.firebase:
         firebase_url = args.firebase.lower()
     else:
